@@ -1,0 +1,372 @@
+"""
+FastAPI server for the Simplified IDSS.
+
+Provides REST API endpoints for UI and simulator integration.
+
+Usage:
+    python -m idss.api.server
+    # or
+    uvicorn idss.api.server:app --reload --port 8000
+"""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Dict, Optional
+import uuid
+from datetime import datetime
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from idss.api.models import (
+    ChatRequest,
+    ChatResponse,
+    SessionResponse,
+    ResetRequest,
+    ResetResponse,
+    RecommendRequest,
+    RecommendResponse,
+    HealthResponse,
+)
+from idss.core.controller import IDSSController, SessionState
+from idss.core.config import get_config, IDSSConfig
+from idss.data.vehicle_store import LocalVehicleStore
+from idss.diversification.entropy import select_diversification_dimension
+from idss.diversification.bucketing import diversify_with_entropy_bucketing
+from idss.recommendation.embedding_similarity import rank_with_embedding_similarity
+from idss.recommendation.coverage_risk import rank_with_coverage_risk
+from idss.utils.logger import get_logger
+
+logger = get_logger("api.server")
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="IDSS API",
+    description="Simplified Interactive Decision Support System API",
+    version="1.0.0"
+)
+
+# Enable CORS for frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Session storage: session_id -> IDSSController
+sessions: Dict[str, IDSSController] = {}
+
+
+def get_or_create_session(session_id: Optional[str] = None) -> tuple[str, IDSSController]:
+    """Get existing session or create new one."""
+    if session_id and session_id in sessions:
+        return session_id, sessions[session_id]
+
+    # Create new session
+    new_session_id = session_id or str(uuid.uuid4())
+    config = get_config()
+    sessions[new_session_id] = IDSSController(config)
+    logger.info(f"Created new session: {new_session_id}")
+    return new_session_id, sessions[new_session_id]
+
+
+# API Endpoints
+
+@app.get("/", response_model=HealthResponse)
+async def root():
+    """Health check endpoint."""
+    config = get_config()
+    return HealthResponse(
+        status="online",
+        service="IDSS API",
+        version="1.0.0",
+        config={
+            "k": config.k,
+            "method": config.recommendation_method,
+            "n_rows": config.num_rows,
+            "n_per_row": config.n_vehicles_per_row,
+        }
+    )
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    Main conversation endpoint.
+
+    Handles user messages, runs interview or generates recommendations.
+    """
+    try:
+        session_id, controller = get_or_create_session(request.session_id)
+
+        # Process the user's message
+        response = controller.process_input(request.message)
+
+        return ChatResponse(
+            response_type=response.response_type,
+            message=response.message,
+            session_id=session_id,
+            quick_replies=response.quick_replies,
+            recommendations=response.recommendations,
+            bucket_labels=response.bucket_labels,
+            diversification_dimension=response.diversification_dimension,
+            filters=response.filters_extracted or {},
+            preferences=response.preferences_extracted or {},
+            question_count=controller.state.question_count,
+        )
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Error in /chat: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/session/{session_id}", response_model=SessionResponse)
+async def get_session(session_id: str):
+    """Get current session state."""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    controller = sessions[session_id]
+    state = controller.state
+
+    return SessionResponse(
+        session_id=session_id,
+        filters=state.explicit_filters,
+        preferences=state.implicit_preferences,
+        question_count=state.question_count,
+        conversation_history=state.conversation_history,
+    )
+
+
+@app.post("/session/reset", response_model=ResetResponse)
+async def reset_session(request: ResetRequest):
+    """Reset session or create new one."""
+    session_id = request.session_id or str(uuid.uuid4())
+
+    # Create fresh controller
+    config = get_config()
+    sessions[session_id] = IDSSController(config)
+    logger.info(f"Reset session: {session_id}")
+
+    return ResetResponse(
+        session_id=session_id,
+        status="reset"
+    )
+
+
+@app.delete("/session/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a session."""
+    if session_id in sessions:
+        del sessions[session_id]
+        logger.info(f"Deleted session: {session_id}")
+        return {"status": "deleted", "session_id": session_id}
+    raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.get("/sessions")
+async def list_sessions():
+    """List all active sessions."""
+    return {
+        "active_sessions": len(sessions),
+        "session_ids": list(sessions.keys())
+    }
+
+
+@app.post("/recommend", response_model=RecommendResponse)
+async def recommend(request: RecommendRequest):
+    """
+    Direct recommendation endpoint (bypass interview).
+
+    Use this for:
+    - Simulator testing with known filters/preferences
+    - UI components that need recommendations without chat
+    - Batch evaluation
+    """
+    try:
+        session_id = request.session_id or str(uuid.uuid4())
+        config = get_config()
+
+        # Override method if specified
+        method = request.method or config.recommendation_method
+
+        # Get vehicle store
+        store = LocalVehicleStore(require_photos=True)
+
+        # Build filters for SQL query
+        db_filters = dict(request.filters) if request.filters else {}
+        if not db_filters:
+            db_filters['year'] = '2018-2025'
+
+        # Step 1: Get candidates from database
+        candidates = store.search_listings(
+            filters=db_filters,
+            limit=500,
+            order_by="price",
+            order_dir="ASC"
+        )
+
+        if not candidates:
+            raise HTTPException(status_code=404, detail="No vehicles found matching filters")
+
+        total_candidates = len(candidates)
+        logger.info(f"Found {total_candidates} candidates from SQL")
+
+        # Step 2: Rank with selected method
+        if method == "embedding_similarity":
+            ranked = rank_with_embedding_similarity(
+                vehicles=candidates,
+                explicit_filters=request.filters,
+                implicit_preferences=request.preferences,
+                top_k=100,
+                lambda_param=config.embedding_similarity_lambda_param,
+                use_mmr=True
+            )
+        elif method == "coverage_risk":
+            ranked = rank_with_coverage_risk(
+                vehicles=candidates,
+                explicit_filters=request.filters,
+                implicit_preferences=request.preferences,
+                top_k=100,
+                lambda_risk=config.coverage_risk_lambda_risk,
+                mode=config.coverage_risk_mode,
+                tau=config.coverage_risk_tau,
+                alpha=config.coverage_risk_alpha
+            )
+        else:
+            ranked = candidates[:100]
+
+        logger.info(f"Ranked to {len(ranked)} candidates using {method}")
+
+        # Step 3: Select diversification dimension
+        div_dimension = select_diversification_dimension(
+            candidates=ranked,
+            explicit_filters=request.filters
+        )
+
+        # Step 4: Bucket vehicles
+        buckets, bucket_labels, _ = diversify_with_entropy_bucketing(
+            vehicles=ranked,
+            dimension=div_dimension,
+            n_rows=request.n_rows,
+            n_per_row=request.n_per_row
+        )
+
+        return RecommendResponse(
+            session_id=session_id,
+            recommendations=buckets,
+            bucket_labels=bucket_labels,
+            diversification_dimension=div_dimension,
+            total_candidates=total_candidates,
+            method_used=method
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        logger.error(f"Error in /recommend: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/recommend/compare")
+async def compare_methods(request: RecommendRequest):
+    """
+    Compare Embedding Similarity vs Coverage-Risk results.
+
+    Returns recommendations from both methods for comparison.
+    """
+    try:
+        config = get_config()
+        store = LocalVehicleStore(require_photos=True)
+
+        # Build filters
+        db_filters = dict(request.filters) if request.filters else {'year': '2018-2025'}
+
+        # Get candidates
+        candidates = store.search_listings(
+            filters=db_filters,
+            limit=500,
+            order_by="price",
+            order_dir="ASC"
+        )
+
+        if not candidates:
+            raise HTTPException(status_code=404, detail="No vehicles found")
+
+        results = {}
+
+        for method in ["embedding_similarity", "coverage_risk"]:
+            # Rank
+            if method == "embedding_similarity":
+                ranked = rank_with_embedding_similarity(
+                    vehicles=candidates,
+                    explicit_filters=request.filters,
+                    implicit_preferences=request.preferences,
+                    top_k=100,
+                    lambda_param=config.embedding_similarity_lambda_param,
+                    use_mmr=True
+                )
+            else:
+                ranked = rank_with_coverage_risk(
+                    vehicles=candidates,
+                    explicit_filters=request.filters,
+                    implicit_preferences=request.preferences,
+                    top_k=100,
+                    lambda_risk=config.coverage_risk_lambda_risk,
+                    mode=config.coverage_risk_mode,
+                    tau=config.coverage_risk_tau,
+                    alpha=config.coverage_risk_alpha
+                )
+
+            # Diversify
+            div_dimension = select_diversification_dimension(
+                candidates=ranked,
+                explicit_filters=request.filters
+            )
+
+            buckets, bucket_labels, _ = diversify_with_entropy_bucketing(
+                vehicles=ranked,
+                dimension=div_dimension,
+                n_rows=request.n_rows,
+                n_per_row=request.n_per_row
+            )
+
+            results[method] = {
+                "recommendations": buckets,
+                "bucket_labels": bucket_labels,
+                "diversification_dimension": div_dimension,
+            }
+
+        return {
+            "total_candidates": len(candidates),
+            "filters": request.filters,
+            "preferences": request.preferences,
+            "embedding_similarity": results["embedding_similarity"],
+            "coverage_risk": results["coverage_risk"],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        logger.error(f"Error in /recommend/compare: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    print("=" * 60)
+    print("IDSS API Server")
+    print("=" * 60)
+    print("API Documentation: http://localhost:8000/docs")
+    print("=" * 60)
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)

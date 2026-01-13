@@ -1,0 +1,194 @@
+"""
+LLM-based question generator for the interview phase.
+
+Generates contextual clarifying questions based on what's already known
+about the user's preferences.
+"""
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field
+import json
+
+from openai import OpenAI
+
+from idss.utils.logger import get_logger
+from idss.core.config import get_config
+
+logger = get_logger("interview.question_generator")
+
+
+class QuestionResponse(BaseModel):
+    """Structured output for question generation."""
+    question: str = Field(
+        description="The clarifying question to ask the user (1-2 sentences)"
+    )
+    quick_replies: List[str] = Field(
+        default_factory=list,
+        description="2-4 short answer options the user can click (2-5 words each)"
+    )
+    topic: str = Field(
+        description="The topic this question addresses (e.g., 'budget', 'usage', 'features')"
+    )
+
+
+SYSTEM_PROMPT = """You are a helpful car shopping assistant. Your goal is to ask clarifying questions
+to understand what the user is looking for so you can make great recommendations.
+
+## Guidelines
+
+1. **Be conversational**: Ask questions naturally, like a helpful salesperson would
+2. **One question at a time**: Focus on one aspect per turn
+3. **Build on context**: Use what you already know to ask relevant follow-ups
+4. **Keep it brief**: 1-2 sentences for your question
+5. **Provide quick replies**: Give 2-4 clickable answer options (2-5 words each)
+
+## Question Progression
+Ask about these topics in a natural order (skip what's already known):
+1. **Use case**: What will they use the car for? (commuting, family, adventure, etc.)
+2. **Budget**: What price range are they considering?
+3. **Size/Type**: What body style? (SUV, sedan, truck, etc.)
+4. **Features**: What features matter most? (fuel efficiency, safety, tech, etc.)
+5. **Other**: Any other preferences (brand, new vs used, color, etc.)
+
+## Important
+- DON'T repeat questions about topics already covered
+- DON'T ask about information already in the filters
+- Make quick_replies diverse and helpful options"""
+
+
+def generate_question(
+    conversation_history: List[Dict[str, str]],
+    explicit_filters: Dict[str, Any],
+    implicit_preferences: Dict[str, Any],
+    questions_asked: List[str]
+) -> QuestionResponse:
+    """
+    Generate the next clarifying question based on context.
+
+    Args:
+        conversation_history: Previous messages
+        explicit_filters: Current known filters
+        implicit_preferences: Current known preferences
+        questions_asked: List of topics already asked about
+
+    Returns:
+        QuestionResponse with question, quick_replies, and topic
+    """
+    config = get_config()
+    client = OpenAI()
+
+    # Build context message
+    context_parts = []
+
+    if explicit_filters:
+        filters_clean = {k: v for k, v in explicit_filters.items() if v is not None}
+        if filters_clean:
+            context_parts.append(f"**Known filters:**\n{json.dumps(filters_clean, indent=2)}")
+
+    if implicit_preferences:
+        prefs_clean = {k: v for k, v in implicit_preferences.items() if v}
+        if prefs_clean:
+            context_parts.append(f"**Known preferences:**\n{json.dumps(prefs_clean, indent=2)}")
+
+    if questions_asked:
+        context_parts.append(f"**Topics already asked about:** {', '.join(questions_asked)}")
+
+    context = "\n\n".join(context_parts) if context_parts else "No information gathered yet."
+
+    # Build messages
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"## Current Context\n{context}"}
+    ]
+
+    # Add conversation history
+    for msg in conversation_history[-4:]:  # Last 4 messages
+        messages.append(msg)
+
+    # Add instruction
+    messages.append({
+        "role": "user",
+        "content": "Generate the next clarifying question to ask the user."
+    })
+
+    try:
+        response = client.beta.chat.completions.parse(
+            model=config.question_generator_model,
+            messages=messages,
+            response_format=QuestionResponse,
+            temperature=0.7  # Slightly higher for variety
+        )
+
+        result = response.choices[0].message.parsed
+        logger.info(f"Generated question: {result.question}")
+        logger.info(f"Quick replies: {result.quick_replies}")
+        logger.info(f"Topic: {result.topic}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to generate question: {e}")
+        # Return a default question on error
+        return QuestionResponse(
+            question="What are you looking for in your next vehicle?",
+            quick_replies=["Daily commuter", "Family car", "Weekend fun", "Work vehicle"],
+            topic="use_case"
+        )
+
+
+def generate_recommendation_intro(
+    explicit_filters: Dict[str, Any],
+    implicit_preferences: Dict[str, Any],
+    diversification_dimension: str,
+    bucket_labels: List[str]
+) -> str:
+    """
+    Generate an introduction message for the recommendations.
+
+    Args:
+        explicit_filters: Known filters
+        implicit_preferences: Known preferences
+        diversification_dimension: The dimension used for diversification
+        bucket_labels: Labels for each bucket/row
+
+    Returns:
+        Introduction message string
+    """
+    config = get_config()
+    client = OpenAI()
+
+    # Build context
+    filters_clean = {k: v for k, v in explicit_filters.items() if v is not None}
+    prefs_clean = {k: v for k, v in implicit_preferences.items() if v}
+
+    prompt = f"""Generate a brief (2-3 sentences) introduction for vehicle recommendations.
+
+**User's criteria:**
+{json.dumps(filters_clean, indent=2) if filters_clean else "Not specified"}
+
+**User's preferences:**
+{json.dumps(prefs_clean, indent=2) if prefs_clean else "Not specified"}
+
+**How results are organized:**
+The results are diversified by {diversification_dimension}, showing options across:
+{', '.join(bucket_labels)}
+
+Write a friendly, helpful intro that:
+1. Acknowledges what the user is looking for
+2. Briefly explains how the results are organized
+3. Invites them to explore the options
+
+Keep it natural and conversational. Don't use bullet points."""
+
+    try:
+        response = client.chat.completions.create(
+            model=config.semantic_parser_model,  # Use faster model for this
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=200
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        logger.error(f"Failed to generate intro: {e}")
+        return f"Based on your preferences, I've found some great options organized by {diversification_dimension}. Take a look!"
