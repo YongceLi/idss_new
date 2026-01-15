@@ -5,8 +5,26 @@ Orchestrates the interview and recommendation flow with configurable k parameter
 """
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+import numpy as np
 
 from idss.utils.logger import get_logger
+
+
+def convert_numpy_types(obj: Any) -> Any:
+    """Recursively convert numpy types to native Python types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    return obj
 from idss.core.config import IDSSConfig, get_config
 from idss.data.vehicle_store import LocalVehicleStore
 from idss.parsing.semantic_parser import (
@@ -256,6 +274,9 @@ class IDSSController:
             "role": "assistant",
             "content": intro_message
         })
+
+        # Convert numpy types to native Python types for JSON serialization
+        buckets = convert_numpy_types(buckets)
 
         return IDSSResponse(
             response_type="recommendations",

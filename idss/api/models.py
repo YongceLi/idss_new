@@ -10,6 +10,12 @@ class ChatRequest(BaseModel):
     message: str = Field(description="User's message")
     session_id: Optional[str] = Field(default=None, description="Session ID (auto-generated if not provided)")
 
+    # Per-request config overrides
+    k: Optional[int] = Field(default=None, description="Number of interview questions (0 = skip interview)")
+    method: Optional[str] = Field(default=None, description="Recommendation method: 'embedding_similarity' or 'coverage_risk'")
+    n_rows: Optional[int] = Field(default=None, description="Number of result rows")
+    n_per_row: Optional[int] = Field(default=None, description="Vehicles per row")
+
 
 class ChatResponse(BaseModel):
     """Response model for chat endpoint."""

@@ -39,6 +39,7 @@ from idss.diversification.bucketing import diversify_with_entropy_bucketing
 from idss.recommendation.embedding_similarity import rank_with_embedding_similarity
 from idss.recommendation.coverage_risk import rank_with_coverage_risk
 from idss.utils.logger import get_logger
+from idss.core.preload import preload_all, preload_for_method
 
 logger = get_logger("api.server")
 
@@ -48,6 +49,41 @@ app = FastAPI(
     description="Simplified Interactive Decision Support System API",
     version="1.0.0"
 )
+
+
+# Track preload status
+_preload_timings: dict = {}
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Preload all heavy resources at server startup."""
+    global _preload_timings
+
+    # Check if preloading is disabled via environment variable
+    skip_preload = os.environ.get("IDSS_SKIP_PRELOAD", "").lower() in ("1", "true", "yes")
+
+    if skip_preload:
+        logger.info("Preloading SKIPPED (IDSS_SKIP_PRELOAD=1)")
+        _preload_timings = {"skipped": True}
+        return
+
+    logger.info("Server starting up - preloading resources...")
+    config = get_config()
+
+    # Preload based on configured method
+    # Set preload_all_methods=True to load both methods (useful if you switch methods at runtime)
+    preload_all_methods = os.environ.get("IDSS_PRELOAD_ALL", "1").lower() in ("1", "true", "yes")
+
+    if preload_all_methods:
+        _preload_timings = preload_all(
+            preload_embedding_similarity=True,
+            preload_coverage_risk=True,
+            preload_database=True
+        )
+    else:
+        # Only preload the configured method
+        _preload_timings = preload_for_method(config.recommendation_method)
 
 # Enable CORS for frontend
 app.add_middleware(
@@ -62,16 +98,43 @@ app.add_middleware(
 sessions: Dict[str, IDSSController] = {}
 
 
-def get_or_create_session(session_id: Optional[str] = None) -> tuple[str, IDSSController]:
-    """Get existing session or create new one."""
+def get_or_create_session(
+    session_id: Optional[str] = None,
+    k: Optional[int] = None,
+    method: Optional[str] = None,
+    n_rows: Optional[int] = None,
+    n_per_row: Optional[int] = None
+) -> tuple[str, IDSSController]:
+    """Get existing session or create new one with optional config overrides."""
     if session_id and session_id in sessions:
-        return session_id, sessions[session_id]
+        controller = sessions[session_id]
+        # Update config on existing session if overrides provided
+        if k is not None:
+            controller.config.k = k
+        if method is not None:
+            controller.config.recommendation_method = method
+        if n_rows is not None:
+            controller.config.num_rows = n_rows
+        if n_per_row is not None:
+            controller.config.n_vehicles_per_row = n_per_row
+        return session_id, controller
 
-    # Create new session
+    # Create new session with config overrides
     new_session_id = session_id or str(uuid.uuid4())
     config = get_config()
+
+    # Apply overrides
+    if k is not None:
+        config.k = k
+    if method is not None:
+        config.recommendation_method = method
+    if n_rows is not None:
+        config.num_rows = n_rows
+    if n_per_row is not None:
+        config.n_vehicles_per_row = n_per_row
+
     sessions[new_session_id] = IDSSController(config)
-    logger.info(f"Created new session: {new_session_id}")
+    logger.info(f"Created new session: {new_session_id} (k={config.k}, method={config.recommendation_method})")
     return new_session_id, sessions[new_session_id]
 
 
@@ -100,9 +163,21 @@ async def chat(request: ChatRequest):
     Main conversation endpoint.
 
     Handles user messages, runs interview or generates recommendations.
+
+    Config overrides (optional):
+    - k: Number of interview questions (0 = skip interview)
+    - method: 'embedding_similarity' or 'coverage_risk'
+    - n_rows: Number of result rows
+    - n_per_row: Vehicles per row
     """
     try:
-        session_id, controller = get_or_create_session(request.session_id)
+        session_id, controller = get_or_create_session(
+            session_id=request.session_id,
+            k=request.k,
+            method=request.method,
+            n_rows=request.n_rows,
+            n_per_row=request.n_per_row
+        )
 
         # Process the user's message
         response = controller.process_input(request.message)
@@ -176,6 +251,23 @@ async def list_sessions():
     return {
         "active_sessions": len(sessions),
         "session_ids": list(sessions.keys())
+    }
+
+
+@app.get("/status")
+async def get_status():
+    """Get server status including preload timings."""
+    config = get_config()
+    return {
+        "status": "online",
+        "config": {
+            "k": config.k,
+            "method": config.recommendation_method,
+            "n_rows": config.num_rows,
+            "n_per_row": config.n_vehicles_per_row,
+        },
+        "preload": _preload_timings,
+        "active_sessions": len(sessions),
     }
 
 
@@ -367,6 +459,11 @@ if __name__ == "__main__":
     print("IDSS API Server")
     print("=" * 60)
     print("API Documentation: http://localhost:8000/docs")
+    print("Status endpoint:   http://localhost:8000/status")
+    print("")
+    print("Environment variables:")
+    print("  IDSS_SKIP_PRELOAD=1   - Skip preloading (faster startup, slow first request)")
+    print("  IDSS_PRELOAD_ALL=0    - Only preload configured method")
     print("=" * 60)
 
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -48,15 +48,24 @@ python scripts/demo.py --k 5 --method embedding_similarity # Ask 5 questions, us
 ### Run the API Server
 
 ```bash
-# Start FastAPI server
+# Start FastAPI server (preloads all models at startup)
 python -m idss.api.server
 
 # Or with uvicorn (auto-reload for development)
 uvicorn idss.api.server:app --reload --port 8000
 
+# Skip preloading for faster startup (models load on first request)
+IDSS_SKIP_PRELOAD=1 python -m idss.api.server
+
+# Only preload the configured method (saves memory)
+IDSS_PRELOAD_ALL=0 python -m idss.api.server
+
 # API documentation available at:
 # http://localhost:8000/docs
+# http://localhost:8000/status  (shows preload timing)
 ```
+
+**Note:** First startup preloads ~2GB of models and embeddings. This takes 60-120 seconds but ensures fast response times for all requests.
 
 ## Configuration
 
@@ -184,17 +193,110 @@ Bucket boundaries computed from data distribution (no hardcoded ranges):
 
 ### Example API Calls
 
-**Chat with interview:**
-```bash
-# Start conversation
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "I want an SUV"}'
+**API Base URL:** `http://137.184.41.112:8000`
 
-# Continue with session_id from response
-curl -X POST http://localhost:8000/chat \
+#### Chat Endpoint (`/chat`)
+
+The main conversation endpoint. Supports per-request configuration overrides.
+
+**Request Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `message` | string | Yes | User's message |
+| `session_id` | string | No | Session ID for conversation continuity |
+| `k` | int | No | Number of interview questions (0 = skip interview) |
+| `method` | string | No | `"embedding_similarity"` or `"coverage_risk"` |
+| `n_rows` | int | No | Number of result rows |
+| `n_per_row` | int | No | Vehicles per row |
+
+**Basic chat (uses default config):**
+```bash
+curl -X POST http://137.184.41.112:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "under 30k", "session_id": "YOUR_SESSION_ID"}'
+  -d '{"message": "I want an SUV under $30000"}'
+```
+
+**Skip interview (k=0) - get recommendations immediately:**
+```bash
+curl -X POST http://137.184.41.112:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "I want an SUV under $30000",
+    "k": 0
+  }'
+```
+
+**Specify recommendation method:**
+```bash
+curl -X POST http://137.184.41.112:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "I want a fuel efficient sedan",
+    "k": 0,
+    "method": "coverage_risk"
+  }'
+```
+
+**Full configuration override:**
+```bash
+curl -X POST http://137.184.41.112:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "I want a family car",
+    "k": 2,
+    "method": "embedding_similarity",
+    "n_rows": 4,
+    "n_per_row": 5
+  }'
+```
+
+#### Session Management
+
+To maintain conversation continuity, pass the `session_id` from previous responses:
+
+```bash
+# First message - starts new session
+curl -X POST http://137.184.41.112:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "I want a fuel efficient sedan",
+    "k": 2
+  }'
+
+# Response: {"session_id": "abc-123", "question_count": 1, ...}
+
+# Second message - continue same session
+curl -X POST http://137.184.41.112:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "I prefer Japanese brands",
+    "session_id": "abc-123",
+    "k": 2
+  }'
+
+# Response: {"session_id": "abc-123", "question_count": 2, ...}
+```
+
+#### Other Endpoints
+
+```bash
+# Health check
+curl http://137.184.41.112:8000/
+
+# Server status (shows preload timing)
+curl http://137.184.41.112:8000/status
+
+# Get session state
+curl http://137.184.41.112:8000/session/YOUR_SESSION_ID
+
+# Reset session
+curl -X POST http://137.184.41.112:8000/session/reset \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "YOUR_SESSION_ID"}'
+
+# List active sessions
+curl http://137.184.41.112:8000/sessions
 ```
 
 ## Project Structure
