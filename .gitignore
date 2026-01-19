@@ -90,7 +90,7 @@ ehthumbs.db
 Desktop.ini
 
 # Data files (symlinked from original repo)
-data/
+/data/
 
 # Large model files
 *.pt
