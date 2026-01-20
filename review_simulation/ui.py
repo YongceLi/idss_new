@@ -64,6 +64,20 @@ def compute_final_stats(results: Iterable[SimulationResult], metric_k: int) -> d
             attribute_totals[name] = current
 
     attribute_rates = {name: stats.rate for name, stats in attribute_totals.items() if stats.total_count}
+    relevance_rates = []
+    newness_rates = []
+    for result in collected:
+        exchanges = result.follow_up_exchanges
+        if not exchanges:
+            continue
+        relevance_rates.append(
+            sum(1 for exchange in exchanges if exchange.judgement.relevance_satisfied)
+            / len(exchanges)
+        )
+        newness_rates.append(
+            sum(1 for exchange in exchanges if exchange.judgement.newness_satisfied)
+            / len(exchanges)
+        )
 
     def _avg(values: list[float]) -> Optional[float]:
         return statistics.mean(values) if values else None
@@ -77,6 +91,8 @@ def compute_final_stats(results: Iterable[SimulationResult], metric_k: int) -> d
         "satisfied_at_k": _avg(satisfied_rates),
         "attribute_satisfaction_rates": attribute_rates,
         "overall_attribute_satisfaction": _avg(list(attribute_rates.values())),
+        "follow_up_relevance_rate": _avg(relevance_rates),
+        "follow_up_newness_rate": _avg(newness_rates),
     }
 
 
@@ -210,6 +226,18 @@ def render_results(results: Iterable[SimulationResult], metric_k: int) -> None:
             f"NDCG@{metric_k} (conf>0.6): {_format_metric(result.metrics.ndcg_at_k_confident)} | "
             f"Satisfied in top {metric_k}: {result.metrics.satisfied_count}"
         )
+        if result.follow_up_exchanges:
+            relevance_rate = sum(
+                1 for exchange in result.follow_up_exchanges if exchange.judgement.relevance_satisfied
+            ) / len(result.follow_up_exchanges)
+            newness_rate = sum(
+                1 for exchange in result.follow_up_exchanges if exchange.judgement.newness_satisfied
+            ) / len(result.follow_up_exchanges)
+            console.print(
+                "Follow-up relevance: "
+                f"{_format_metric(relevance_rate)} | "
+                f"Follow-up newness: {_format_metric(newness_rate)}"
+            )
         if result.metrics.attribute_satisfaction:
             attr_parts = []
             for key, stats in sorted(result.metrics.attribute_satisfaction.items()):
@@ -228,6 +256,13 @@ def render_results(results: Iterable[SimulationResult], metric_k: int) -> None:
         f"NDCG@{metric_k} (conf>0.6): {_format_metric(final_stats['ndcg_at_k_confident'])} | "
         f"Satisfied@{metric_k}: {_format_metric(final_stats['satisfied_at_k'])}"
     )
+    if final_stats.get("follow_up_relevance_rate") is not None:
+        console.print(
+            "Follow-up relevance avg: "
+            f"{_format_metric(final_stats['follow_up_relevance_rate'])} | "
+            "Follow-up newness avg: "
+            f"{_format_metric(final_stats['follow_up_newness_rate'])}"
+        )
     if final_stats["attribute_satisfaction_rates"]:
         attr_parts = []
         for key, rate in sorted(final_stats["attribute_satisfaction_rates"].items()):
