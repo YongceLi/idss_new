@@ -241,11 +241,41 @@ idss_new/
 │       └── logger.py
 ├── scripts/
 │   └── demo.py                   # Interactive CLI demo
+├── review_simulation/            # Persona-based evaluation workflow
 ├── .env                          # API keys (not in git)
 ├── .gitignore
 ├── README.md
 └── requirements.txt
 ```
+
+## Review Simulation Workflow
+
+The `review_simulation` package provides a persona-driven evaluation loop for the IDSS controller. It synthesizes user queries from reviews, simulates follow-up Q&A, and scores recommendation quality.
+
+### 1) Generate personas + queries
+```bash
+python review_simulation/generate_persona_queries.py data/reviews_enriched.csv --output data/personas.csv
+```
+
+### 2) Run the simulation
+```bash
+python review_simulation/run.py data/personas.csv \
+  --k 3 \
+  --n-per-row 3 \
+  --method embedding_similarity \
+  --limit 20 \
+  --metric-k 20 \
+  --export data/persona_results.csv
+```
+
+### 3) Replay exported results
+```bash
+python review_simulation/replay_results.py data/persona_results.csv \
+  --metric-k 20 \
+  --stats-output data/persona_results_stats.json
+```
+
+For more details about script behavior and output fields, see `review_simulation/README.md`.
 
 ## Data Requirements
 
