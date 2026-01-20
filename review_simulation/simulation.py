@@ -322,6 +322,9 @@ ASSESSMENT_PROMPT = ChatPromptTemplate.from_messages(
             """
 Persona query: {persona_query}
 
+Conversation history (most recent last):
+{conversation_history}
+
 Vehicle preference extraction:
 {vehicle_preferences}
 
@@ -335,8 +338,8 @@ Use the provided year judgement included with each vehicle entry instead of reca
 Use the provided price judgement included with each vehicle entry instead of recalculating year fit.
 
 For each vehicle below decide if the persona would be satisfied. Judge only the
-criteria explicitly mentioned in the persona_query; if a criterion was not
-mentioned, return null for that criterion. Respond with JSON using this shape:
+criteria explicitly mentioned in the persona_query and conversation history; if a
+criterion was not mentioned, return null for that criterion. Respond with JSON using this shape:
 {{"assessments": [{{"index": <number>, "satisfied": <bool>, "rationale": <string>, "confidence": <float 0-1>,
 "price": {{...}}, "condition": {{...}}, "year": {{...}},
 "make": {{...}}, "model": {{...}}, "fuel_type": {{...}}, "body_type": {{...}}, "all_misc": {{...}}}}, ...]}}.
@@ -652,6 +655,7 @@ def _assess_vehicles(
     persona: ReviewPersona,
     persona_turn: PersonaTurn,
     vehicles: List[dict],
+    conversation_history: List[Dict[str, str]],
     model: ChatOpenAI,
 ) -> List[VehicleJudgement]:
     structured_model = model.with_structured_output(VehicleAssessmentList)
@@ -682,6 +686,7 @@ def _assess_vehicles(
         year_judgements[entry["index"]] = year_judgement
     prompt = ASSESSMENT_PROMPT.format_prompt(
         persona_query=persona_turn.message,
+        conversation_history=json.dumps(conversation_history, indent=2),
         year_preferences=year_preferences.model_dump_json(indent=2),
         vehicle_preferences=vehicle_preferences.model_dump_json(indent=2),
         vehicles=json.dumps(vehicle_entries, indent=2),
@@ -1006,7 +1011,13 @@ def evaluate_persona(
     vehicles = [item for row in recommendation_rows for item in row]
     vehicles = vehicles[:recommendation_limit]
 
-    judgements = _assess_vehicles(persona, persona_turn, vehicles, llm)
+    judgements = _assess_vehicles(
+        persona,
+        persona_turn,
+        vehicles,
+        conversation_history,
+        llm,
+    )
     attempts: List[List[VehicleJudgement]] = [judgements]
 
     def _avg_confidence(items: List[VehicleJudgement]) -> Optional[float]:
@@ -1053,7 +1064,13 @@ def evaluate_persona(
 
     remaining_attempts = max_assessment_attempts - 1
     while not threshold_met and remaining_attempts > 0:
-        new_attempt = _assess_vehicles(persona, persona_turn, vehicles, llm)
+        new_attempt = _assess_vehicles(
+            persona,
+            persona_turn,
+            vehicles,
+            conversation_history,
+            llm,
+        )
         attempts.append(new_attempt)
         attempt_confidence = _avg_confidence(new_attempt)
         if attempt_confidence is not None and attempt_confidence >= confidence_threshold:
