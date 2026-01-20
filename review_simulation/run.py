@@ -35,13 +35,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        default=20,
+        default=9,
         help="Maximum number of recommended vehicles to inspect",
     )
     parser.add_argument(
         "--metric-k",
         type=int,
-        default=20,
+        default=9,
         help="k value for precision/recall reporting (defaults to limit)",
     )
     parser.add_argument(
