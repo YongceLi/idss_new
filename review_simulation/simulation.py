@@ -10,12 +10,8 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
+from idss import create_controller
 from review_simulation.persona import ReviewPersona, VehicleAffinity
-from scripts.test_recommendation_methods import (
-    test_method1_pipeline,
-    test_method2_pipeline,
-    test_method3_pipeline,
-)
 
 
 @dataclass
@@ -89,6 +85,26 @@ class SimulationResult:
     metrics: SimulationMetrics
     recommendation_response: Dict[str, Any]
     summary: str
+    conversation_history: List[Dict[str, str]]
+    follow_up_exchanges: List["FollowUpExchange"]
+
+
+@dataclass
+class FollowUpJudgement:
+    relevance_satisfied: bool
+    relevance_confidence: Optional[float]
+    relevance_rationale: str
+    newness_satisfied: bool
+    newness_confidence: Optional[float]
+    newness_rationale: str
+
+
+@dataclass
+class FollowUpExchange:
+    question: str
+    quick_replies: Optional[List[str]]
+    answer: str
+    judgement: FollowUpJudgement
 
 
 class PersonaDraft(BaseModel):
@@ -165,6 +181,27 @@ class VehiclePreferenceExtraction(BaseModel):
     fuel_type_alternative: bool
     body_type_preference: List[str]
     body_type_alternative: bool
+
+
+class FollowUpJudgeResponse(BaseModel):
+    relevance_satisfied: bool = Field(
+        ..., description="Whether the follow-up question is relevant to the persona and history"
+    )
+    relevance_confidence: float = Field(
+        ..., description="Confidence 0-1 for relevance judgement"
+    )
+    relevance_rationale: str = Field(
+        ..., description="Short rationale (<=20 words) for relevance"
+    )
+    newness_satisfied: bool = Field(
+        ..., description="Whether the follow-up question asks for new information"
+    )
+    newness_confidence: float = Field(
+        ..., description="Confidence 0-1 for newness judgement"
+    )
+    newness_rationale: str = Field(
+        ..., description="Short rationale (<=20 words) for newness"
+    )
 
 
 YEAR_EXTRACTION_PROMPT = ChatPromptTemplate.from_messages(
@@ -364,6 +401,69 @@ If there are no reasons, respond None.
 )
 
 
+FOLLOW_UP_JUDGE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You judge the quality of a follow-up question asked by a car recommendation assistant."
+            "Evaluate relevance to the persona query and conversation history, and whether it asks for new information.",
+        ),
+        (
+            "human",
+            """
+Persona query:
+{persona_query}
+
+Conversation history (most recent last):
+{conversation_history}
+
+Follow-up question:
+{follow_up_question}
+
+Return JSON with:
+- relevance_satisfied: true/false
+- relevance_confidence: 0-1
+- relevance_rationale: <=20 words
+- newness_satisfied: true/false (true if it asks for information not already stated)
+- newness_confidence: 0-1
+- newness_rationale: <=20 words
+""",
+        ),
+    ]
+)
+
+
+FOLLOW_UP_ANSWER_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are simulating a user persona answering a follow-up question about car preferences."
+            "Respond in the persona's writing style and interaction style. Be concise and natural.",
+        ),
+        (
+            "human",
+            """
+Persona writing style: {persona_writing_style}
+Persona interaction style: {persona_interaction_style}
+Persona family background: {persona_family_background}
+Persona goal summary: {persona_goal_summary}
+Persona query: {persona_query}
+
+Conversation history (most recent last):
+{conversation_history}
+
+Follow-up question:
+{follow_up_question}
+
+Quick replies offered: {quick_replies}
+
+Answer the follow-up question as the persona. Use quick replies if appropriate, but you may rephrase.
+""",
+        ),
+    ]
+)
+
+
 def _affinities_to_text(items: List[VehicleAffinity]) -> str:
     if not items:
         return "None"
@@ -405,7 +505,9 @@ def _format_vehicle_entry(vehicle: dict, index: int) -> Dict[str, Optional[str]]
         except (TypeError, ValueError):
             year = None
 
-    used_flag = vehicle.get("norm_is_used")
+    used_flag = car.get("norm_is_used")
+    if used_flag is None:
+        used_flag = vehicle.get("norm_is_used")
     condition = "used" if used_flag else "new"
 
     city = listing.get("city") or vehicle.get("dealer_city")
@@ -773,12 +875,58 @@ def _summarize_judgements(
     return " | ".join(parts)
 
 
+def _judge_follow_up_question(
+    persona_turn: PersonaTurn,
+    conversation_history: List[Dict[str, str]],
+    follow_up_question: str,
+    model: ChatOpenAI,
+) -> FollowUpJudgement:
+    structured_model = model.with_structured_output(FollowUpJudgeResponse)
+    prompt = FOLLOW_UP_JUDGE_PROMPT.format_prompt(
+        persona_query=persona_turn.message,
+        conversation_history=json.dumps(conversation_history, indent=2),
+        follow_up_question=follow_up_question,
+    )
+    response = structured_model.invoke(prompt.to_messages())
+    return FollowUpJudgement(
+        relevance_satisfied=response.relevance_satisfied,
+        relevance_confidence=response.relevance_confidence,
+        relevance_rationale=response.relevance_rationale.strip(),
+        newness_satisfied=response.newness_satisfied,
+        newness_confidence=response.newness_confidence,
+        newness_rationale=response.newness_rationale.strip(),
+    )
+
+
+def _answer_follow_up_question(
+    persona_turn: PersonaTurn,
+    conversation_history: List[Dict[str, str]],
+    follow_up_question: str,
+    quick_replies: Optional[List[str]],
+    model: ChatOpenAI,
+) -> str:
+    prompt = FOLLOW_UP_ANSWER_PROMPT.format_prompt(
+        persona_writing_style=persona_turn.writing_style,
+        persona_interaction_style=persona_turn.interaction_style,
+        persona_family_background=persona_turn.family_background,
+        persona_goal_summary=persona_turn.goal_summary,
+        persona_query=persona_turn.message,
+        conversation_history=json.dumps(conversation_history, indent=2),
+        follow_up_question=follow_up_question,
+        quick_replies=", ".join(quick_replies) if quick_replies else "None",
+    )
+    response = model.invoke(prompt.to_messages())
+    return response.content.strip()
+
+
 def run_simulation(
     persona: ReviewPersona,
     llm: ChatOpenAI,
     recommendation_limit: int = 20,
     metric_k: Optional[int] = None,
-    recommendation_method: int = 1,
+    recommendation_method: str = "embedding_similarity",
+    k: int = 3,
+    n_per_row: int = 3,
     confidence_threshold: float = 0.5,
     max_assessment_attempts: int = 3,
 ) -> SimulationResult:
@@ -791,6 +939,8 @@ def run_simulation(
         recommendation_limit=recommendation_limit,
         metric_k=metric_k,
         recommendation_method=recommendation_method,
+        k=k,
+        n_per_row=n_per_row,
         confidence_threshold=confidence_threshold,
         max_assessment_attempts=max_assessment_attempts,
     )
@@ -802,23 +952,59 @@ def evaluate_persona(
     llm: ChatOpenAI,
     recommendation_limit: int = 20,
     metric_k: Optional[int] = None,
-    recommendation_method: int = 1,
+    recommendation_method: str = "embedding_similarity",
+    k: int = 3,
+    n_per_row: int = 3,
     confidence_threshold: float = 0.5,
     max_assessment_attempts: int = 3,
 ) -> SimulationResult:
+    controller = create_controller(
+        k=k,
+        n_vehicles_per_row=n_per_row,
+        recommendation_method=recommendation_method,
+    )
+    response = controller.process_input(persona_turn.message)
+    conversation_history: List[Dict[str, str]] = [
+        {"role": "user", "content": persona_turn.message}
+    ]
+    follow_up_exchanges: List[FollowUpExchange] = []
+    max_followups = max(1, k) + 2
 
-    if recommendation_method == 1:
-        response = test_method1_pipeline(persona_turn.message)
-    elif recommendation_method == 2:
-        response = test_method2_pipeline(persona_turn.message)
-    elif recommendation_method == 3:
-        response = test_method3_pipeline(persona_turn.message)
-    else:
-        raise ValueError(
-            "recommendation_method must be 1, 2, or 3; received"
-            f" {recommendation_method}"
+    while response.response_type == "question" and len(follow_up_exchanges) < max_followups:
+        conversation_history.append({"role": "assistant", "content": response.message})
+        judgement = _judge_follow_up_question(
+            persona_turn,
+            conversation_history,
+            response.message,
+            llm,
         )
-    vehicles = (response.get("recommended_vehicles") or [])[:recommendation_limit]
+        answer = _answer_follow_up_question(
+            persona_turn,
+            conversation_history,
+            response.message,
+            response.quick_replies,
+            llm,
+        )
+        conversation_history.append({"role": "user", "content": answer})
+        follow_up_exchanges.append(
+            FollowUpExchange(
+                question=response.message,
+                quick_replies=response.quick_replies,
+                answer=answer,
+                judgement=judgement,
+            )
+        )
+        response = controller.process_input(answer)
+
+    if response.response_type == "question":
+        conversation_history.append({"role": "assistant", "content": response.message})
+
+    if response.response_type == "recommendations":
+        conversation_history.append({"role": "assistant", "content": response.message})
+
+    recommendation_rows = response.recommendations or []
+    vehicles = [item for row in recommendation_rows for item in row]
+    vehicles = vehicles[:recommendation_limit]
 
     judgements = _assess_vehicles(persona, persona_turn, vehicles, llm)
     attempts: List[List[VehicleJudgement]] = [judgements]
@@ -893,6 +1079,13 @@ def evaluate_persona(
         persona_turn=persona_turn,
         vehicles=judgements,
         metrics=metrics,
-        recommendation_response=response,
+        recommendation_response={
+            "diversification_dimension": response.diversification_dimension,
+            "filters_extracted": response.filters_extracted,
+            "preferences_extracted": response.preferences_extracted,
+            "bucket_labels": response.bucket_labels,
+        },
         summary=summary,
+        conversation_history=conversation_history,
+        follow_up_exchanges=follow_up_exchanges,
     )

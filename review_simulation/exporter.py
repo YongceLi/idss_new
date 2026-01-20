@@ -5,7 +5,12 @@ import json
 from typing import Dict, List
 
 from review_simulation.persona import ReviewPersona, VehicleAffinity
-from review_simulation.simulation import PersonaTurn, SimulationResult, VehicleJudgement
+from review_simulation.simulation import (
+    FollowUpExchange,
+    PersonaTurn,
+    SimulationResult,
+    VehicleJudgement,
+)
 
 
 PERSONA_EXPORT_COLUMNS = [
@@ -46,8 +51,12 @@ RESULT_EXPORT_COLUMNS = PERSONA_EXPORT_COLUMNS + [
     "infra_list_diversity",
     "ndcg_at_k",
     "ndcg_at_k_confident",
-    "extracted_filters",
-    "implicit_preferences",
+    "diversification_dimension",
+    "filters_extracted",
+    "preferences_extracted",
+    "bucket_labels",
+    "conversation_history",
+    "follow_up_exchanges",
     "summary",
     "vehicle_judgements",
     "sql_query",
@@ -99,6 +108,29 @@ def serialize_vehicle_judgements(judgements: List[VehicleJudgement]) -> str:
                 },
             }
             for item in judgements
+        ]
+    )
+
+
+def serialize_followup_exchanges(exchanges: List[FollowUpExchange]) -> str:
+    """Convert follow-up exchanges into JSON."""
+
+    return json.dumps(
+        [
+            {
+                "question": exchange.question,
+                "quick_replies": exchange.quick_replies,
+                "answer": exchange.answer,
+                "judgement": {
+                    "relevance_satisfied": exchange.judgement.relevance_satisfied,
+                    "relevance_confidence": exchange.judgement.relevance_confidence,
+                    "relevance_rationale": exchange.judgement.relevance_rationale,
+                    "newness_satisfied": exchange.judgement.newness_satisfied,
+                    "newness_confidence": exchange.judgement.newness_confidence,
+                    "newness_rationale": exchange.judgement.newness_rationale,
+                },
+            }
+            for exchange in exchanges
         ]
     )
 
@@ -156,8 +188,16 @@ def result_to_row(result: SimulationResult) -> Dict[str, object]:
             "infra_list_diversity": metrics.infra_list_diversity,
             "ndcg_at_k": metrics.ndcg_at_k,
             "ndcg_at_k_confident": metrics.ndcg_at_k_confident,
-            "extracted_filters": json.dumps(result.recommendation_response.get("extracted_filters")),
-            "implicit_preferences": json.dumps(result.recommendation_response.get("implicit_preferences")),
+            "diversification_dimension": result.recommendation_response.get(
+                "diversification_dimension"
+            ),
+            "filters_extracted": json.dumps(result.recommendation_response.get("filters_extracted")),
+            "preferences_extracted": json.dumps(
+                result.recommendation_response.get("preferences_extracted")
+            ),
+            "bucket_labels": json.dumps(result.recommendation_response.get("bucket_labels")),
+            "conversation_history": json.dumps(result.conversation_history),
+            "follow_up_exchanges": serialize_followup_exchanges(result.follow_up_exchanges),
             "summary": result.summary,
             "vehicle_judgements": serialize_vehicle_judgements(result.vehicles),
             "sql_query": result.recommendation_response.get("sql_query", None),

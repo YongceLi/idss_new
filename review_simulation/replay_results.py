@@ -13,6 +13,8 @@ from review_simulation.persona import ReviewPersona, load_personas_from_frame
 from review_simulation.simulation import (
     AttributeJudgement,
     AttributeSatisfaction,
+    FollowUpExchange,
+    FollowUpJudgement,
     PersonaTurn,
     SimulationMetrics,
     SimulationResult,
@@ -61,6 +63,35 @@ def _attribute_judgement_from_export(value: dict | None) -> AttributeJudgement:
 
     rationale = value.get("rationale") if isinstance(value, dict) else None
     return AttributeJudgement(satisfied=satisfied_value, rationale=rationale)
+
+
+def _followup_exchanges_from_export(value: str) -> List[FollowUpExchange]:
+    if not value or (isinstance(value, float) and pd.isna(value)):
+        return []
+    raw = json.loads(value)
+    exchanges: List[FollowUpExchange] = []
+    for entry in raw or []:
+        judgement_raw = entry.get("judgement") or {}
+        exchanges.append(
+            FollowUpExchange(
+                question=entry.get("question", ""),
+                quick_replies=entry.get("quick_replies"),
+                answer=entry.get("answer", ""),
+                judgement=FollowUpJudgement(
+                    relevance_satisfied=judgement_raw.get("relevance_satisfied", False),
+                    relevance_confidence=_parse_confidence(
+                        judgement_raw.get("relevance_confidence")
+                    ),
+                    relevance_rationale=judgement_raw.get("relevance_rationale", ""),
+                    newness_satisfied=judgement_raw.get("newness_satisfied", False),
+                    newness_confidence=_parse_confidence(
+                        judgement_raw.get("newness_confidence")
+                    ),
+                    newness_rationale=judgement_raw.get("newness_rationale", ""),
+                ),
+            )
+        )
+    return exchanges
 
 
 def _load_results(frame: pd.DataFrame) -> List[SimulationResult]:
@@ -125,11 +156,17 @@ def _load_results(frame: pd.DataFrame) -> List[SimulationResult]:
         )
 
         recommendation_response = {
-            "extracted_filters": json.loads(row.get("extracted_filters") or "null"),
-            "implicit_preferences": json.loads(row.get("implicit_preferences") or "null"),
+            "diversification_dimension": row.get("diversification_dimension"),
+            "filters_extracted": json.loads(row.get("filters_extracted") or "null"),
+            "preferences_extracted": json.loads(row.get("preferences_extracted") or "null"),
+            "bucket_labels": json.loads(row.get("bucket_labels") or "null"),
             "sql_query": row.get("sql_query"),
             "overall_attribute_satisfaction": row.get("overall_attribute_satisfaction"),
         }
+        conversation_history = json.loads(row.get("conversation_history") or "[]")
+        follow_up_exchanges = _followup_exchanges_from_export(
+            row.get("follow_up_exchanges") or "[]"
+        )
 
         results.append(
             SimulationResult(
@@ -139,6 +176,8 @@ def _load_results(frame: pd.DataFrame) -> List[SimulationResult]:
                 metrics=metrics,
                 recommendation_response=recommendation_response,
                 summary=row.get("summary", ""),
+                conversation_history=conversation_history,
+                follow_up_exchanges=follow_up_exchanges,
             )
         )
     return results

@@ -46,10 +46,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--method",
+        type=str,
+        default="embedding_similarity",
+        help="Recommendation method to evaluate (embedding_similarity or coverage_risk)",
+    )
+    parser.add_argument(
+        "--k",
         type=int,
-        choices=[1, 2, 3],
-        default=1,
-        help="Recommendation method to evaluate (1 = SQL + Vector + MMR, 2 = Web Search + Parallel SQL, 3 = SQL + Coverage-Risk Optimization)",
+        default=3,
+        help="Number of follow-up questions the controller should ask",
+    )
+    parser.add_argument(
+        "--n-per-row",
+        type=int,
+        default=3,
+        help="Number of vehicles per row in the recommendation grid",
     )
     parser.add_argument(
         "--max-personas",
@@ -119,6 +130,8 @@ def main() -> None:
                 recommendation_limit=args.limit,
                 metric_k=args.metric_k,
                 recommendation_method=args.method,
+                k=args.k,
+                n_per_row=args.n_per_row,
                 confidence_threshold=args.confidence_threshold,
                 max_assessment_attempts=args.max_assessment_attempts,
             )
