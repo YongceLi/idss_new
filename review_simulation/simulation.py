@@ -320,9 +320,10 @@ ASSESSMENT_PROMPT = ChatPromptTemplate.from_messages(
         (
             "human",
             """
-Persona query: {persona_query}
+Persona query. Read this carefully to understand the persona's preferences: {persona_query}
 
-Conversation history (most recent last):
+Conversation history (most recent last). This is the follow-up questions with the system, and answer from the persona. 
+Read this carefully to understand the persona's preferences further:
 {conversation_history}
 
 Vehicle preference extraction:
@@ -332,8 +333,8 @@ Current year is 2025 (assume this for the most newness context).
 Do NOT make assumptions beyond the provided information. Only use the data given to make your judgements.
 Do NOT assume the modernity of the vehicle beyond the year provided (The closer the year to 2025, the newer and more modern the vehicle).
 Do NOT make assumptions about the make or model beyond what is explicitly given.
-Only consider the information given in the Persona Query and the vehicle details provided to evaluate satisfaction.
-Use the rest of the information only as a guideline, as they might not reflect the actual preferences expressed in the Persona Query.
+Only consider the information given in the Persona Query and Conversation history and the vehicle details provided to evaluate satisfaction.
+Use the rest of the information only as a guideline, as they might not reflect the actual preferences expressed in the Persona Query and Conversation history.
 Use the provided year judgement included with each vehicle entry instead of recalculating year fit.
 Use the provided price judgement included with each vehicle entry instead of recalculating year fit.
 
@@ -460,7 +461,7 @@ Follow-up question:
 
 Quick replies offered: {quick_replies}
 
-Answer the follow-up question as the persona. Use quick replies if appropriate, but you may rephrase.
+Answer the follow-up question as the persona. Use quick replies if appropriate, but you may rephrase. Keep your answer succinct, under 20 words.
 """,
         ),
     ]
