@@ -306,6 +306,54 @@ under 120 words and avoid lists/bullets. In details:
     ]
 )
 
+PERSONA_PROMPT_SHORT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You craft single-turn user utterances for a car recommendation demo."
+            "Read the reviewer's background and produce a concise, natural query."
+            "Every generated query must restate the shopper's concrete preferences."
+            "Identify the highest price the shopper would pay and include it.",
+        ),
+        (
+            "human",
+            """
+Review summary:
+Make/Model owned or discussed: {make} {model}
+Rating given: {rating}
+Review excerpt: "{review}"
+Likes: {likes}
+Dislikes: {dislikes}
+Stated intention: {intention}
+Mentioned makes: {mentioned_makes}
+Mentioned models: {mentioned_models}
+Mentioned years: {mentioned_years}
+Preferred condition: {preferred_condition}
+Newness preference (1-10): {newness_preference_score} — {newness_preference_notes}
+Preferred vehicle type: {preferred_vehicle_type}
+Preferred fuel type: {preferred_fuel_type}
+Openness to alternatives (1-10): {openness_to_alternatives}
+Other priorities: {misc_notes}
+Current year is 2025 (assume this for the most newness context).
+
+Create a JSON object with keys writing_style, interaction_style, family_background,
+goal_summary, upper_price_limit, and user_message. The user_message must be the exact text the
+persona will send to the assistant in a single turn. It should reflect their
+writing style and refer to their family/life context when appropriate. Keep it succinct and
+under 10 words and avoid lists/bullets. In details:
+- writing_style: A brief description of the user's writing style.
+- interaction_style: A brief description of how the user prefers to interact.
+- family_background: A brief summary of the user's family/life context relevant to car buying.
+- goal_summary: A concise summary of the user's goal when interacting with a car recommendation agent.
+- upper_price_limit: Your best estimate of the shopper's maximum acceptable price in USD (numbers only). Use null if unknown.
+- user_message: Succinctly mention the desired make/model (if any), relevant years, whether the car should be new or used, how
+  new they want the search to be, body style, preferred fuel type, willingness to consider alternatives, the maximum price to pay,
+  and any additional priorities highlighted above. Make sure to keep it under 10 words, and natural. It is okay to omit some details due to the word limit.
+""",
+        ),
+    ]
+)
+
 
 ASSESSMENT_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -623,6 +671,41 @@ def build_persona_turn(persona: ReviewPersona, model: ChatOpenAI) -> PersonaTurn
     rating_text = persona.rating_value if persona.rating_value is not None else "unknown"
 
     prompt = PERSONA_PROMPT.format_prompt(
+        make=persona.make,
+        model=persona.model,
+        rating=rating_text,
+        review=persona.review,
+        likes=likes_text,
+        dislikes=dislikes_text,
+        intention=persona.intention or "",
+        mentioned_makes=_list_to_text(persona.mentioned_makes),
+        mentioned_models=_list_to_text(persona.mentioned_models),
+        mentioned_years=_list_to_text([str(year) for year in persona.mentioned_years]),
+        preferred_condition=persona.preferred_condition or "unspecified",
+        newness_preference_score=persona.newness_preference_score or "unknown",
+        newness_preference_notes=persona.newness_preference_notes or "",
+        preferred_vehicle_type=persona.preferred_vehicle_type or "unspecified",
+        preferred_fuel_type=persona.preferred_fuel_type or "unspecified",
+        openness_to_alternatives=persona.alternative_openness or "unknown",
+        misc_notes=persona.misc_notes or "None stated",
+    )
+    draft = structured_model.invoke(prompt.to_messages())
+    return PersonaTurn(
+        message=draft.user_message.strip(),
+        writing_style=draft.writing_style.strip(),
+        interaction_style=draft.interaction_style.strip(),
+        family_background=draft.family_background.strip(),
+        goal_summary=draft.goal_summary.strip(),
+        upper_price_limit=draft.upper_price_limit,
+    )
+
+def build_persona_turn_short(persona: ReviewPersona, model: ChatOpenAI) -> PersonaTurn:
+    structured_model = model.with_structured_output(PersonaDraft)
+    likes_text = _affinities_to_text(persona.liked)
+    dislikes_text = _affinities_to_text(persona.disliked)
+    rating_text = persona.rating_value if persona.rating_value is not None else "unknown"
+
+    prompt = PERSONA_PROMPT_SHORT.format_prompt(
         make=persona.make,
         model=persona.model,
         rating=rating_text,

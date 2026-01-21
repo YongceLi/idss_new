@@ -11,7 +11,7 @@ from langchain_openai import ChatOpenAI
 
 from review_simulation.exporter import PERSONA_EXPORT_COLUMNS, persona_to_row
 from review_simulation.persona import ReviewPersona, load_personas_from_frame
-from review_simulation.simulation import build_persona_turn
+from review_simulation.simulation import build_persona_turn, build_persona_turn_short
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cap on number of personas processed",
     )
+
+    parser.add_argument(
+        "--short",
+        action="store_true",
+        help="Use the shortened persona prompt variant",
+    )
     return parser.parse_args()
 
 
@@ -49,7 +55,10 @@ def main() -> None:
 
     rows = []
     for persona in personas:
-        turn = build_persona_turn(persona, llm)
+        if args.short:
+            turn = build_persona_turn_short(persona, llm)
+        else:
+            turn = build_persona_turn(persona, llm)
         rows.append(persona_to_row(persona, turn))
 
     output_path = args.output
