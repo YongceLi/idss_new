@@ -44,6 +44,12 @@ class IDSSConfig:
     coverage_risk_tau: float = 0.5
     coverage_risk_alpha: float = 1.0
 
+    # Ablation flags (for experiments)
+    use_mmr_diversification: bool = True      # Use MMR in embedding similarity ranking
+    use_entropy_bucketing: bool = True        # Use entropy-based bucketing for diversification
+    use_progressive_relaxation: bool = True   # Use progressive filter relaxation
+    use_entropy_questions: bool = True        # Use entropy-based question dimension selection
+
     # Model configuration
     semantic_parser_model: str = "gpt-4o-mini"
     question_generator_model: str = "gpt-4o"

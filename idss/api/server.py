@@ -16,7 +16,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Optional
 import uuid
+import json
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -42,6 +44,69 @@ from idss.utils.logger import get_logger
 from idss.core.preload import preload_all, preload_for_method
 
 logger = get_logger("api.server")
+
+# Conversation logging for production
+CONVERSATION_LOG_DIR = Path(os.getenv("CONVERSATION_LOG_DIR", "logs/sessions"))
+CONVERSATION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def log_conversation(
+    session_id: str,
+    user_message: str,
+    response_type: str,
+    response_message: str,
+    filters: dict,
+    recommendations: list = None,
+    bucket_labels: list = None,
+    diversification_dimension: str = None,
+):
+    """Log conversation turn to per-session JSONL file."""
+    log_entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "user_message": user_message,
+        "response_type": response_type,
+        "response_message": response_message,
+        "filters_extracted": filters,
+    }
+
+    # Add recommendation details if present
+    if recommendations:
+        buckets_summary = []
+        total_count = 0
+        for bucket_idx, bucket in enumerate(recommendations):
+            bucket_label = bucket_labels[bucket_idx] if bucket_labels and bucket_idx < len(bucket_labels) else f"Bucket {bucket_idx + 1}"
+            vehicles_in_bucket = []
+            for vehicle in bucket:
+                v = vehicle.get("vehicle", vehicle)
+                vehicles_in_bucket.append({
+                    "vin": vehicle.get("vin"),
+                    "year": v.get("year"),
+                    "make": v.get("make"),
+                    "model": v.get("model"),
+                    "trim": v.get("trim"),
+                    "price": vehicle.get("retailListing", {}).get("price") or vehicle.get("price"),
+                    "mileage": vehicle.get("retailListing", {}).get("mileage") or vehicle.get("mileage"),
+                })
+            buckets_summary.append({
+                "bucket_label": bucket_label,
+                "vehicles": vehicles_in_bucket,
+            })
+            total_count += len(vehicles_in_bucket)
+        log_entry["recommendations"] = buckets_summary
+        log_entry["recommendations_count"] = total_count
+        log_entry["diversification_dimension"] = diversification_dimension
+
+    # Log to session-specific file
+    session_log_file = CONVERSATION_LOG_DIR / f"{session_id}.jsonl"
+    try:
+        with open(session_log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+    except Exception as e:
+        logger.error(f"Failed to write conversation log: {e}")
+
+    # Also log to stdout for Digital Ocean's logging
+    logger.info(f"CONVERSATION [{session_id}]: {json.dumps(log_entry)}")
+
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -181,6 +246,18 @@ async def chat(request: ChatRequest):
 
         # Process the user's message
         response = controller.process_input(request.message)
+
+        # Log conversation for analytics
+        log_conversation(
+            session_id=session_id,
+            user_message=request.message,
+            response_type=response.response_type,
+            response_message=response.message,
+            filters=response.filters_extracted or {},
+            recommendations=response.recommendations,
+            bucket_labels=response.bucket_labels,
+            diversification_dimension=response.diversification_dimension,
+        )
 
         return ChatResponse(
             response_type=response.response_type,
