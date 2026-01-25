@@ -8,6 +8,7 @@ from typing import List, Tuple
 
 import pandas as pd
 from langchain_openai import ChatOpenAI
+from tqdm import tqdm
 
 from review_simulation.exporter import RESULT_EXPORT_COLUMNS, result_to_row
 from review_simulation.persona import ReviewPersona, load_personas_from_frame
@@ -121,7 +122,7 @@ def main() -> None:
     llm = ChatOpenAI(model=args.model, temperature=0.4)
 
     results: List[SimulationResult] = []
-    for persona, turn in persona_pairs:
+    for persona, turn in tqdm(persona_pairs, desc="Evaluating personas"):
         results.append(
             evaluate_persona(
                 persona,

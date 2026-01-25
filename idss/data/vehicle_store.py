@@ -395,13 +395,33 @@ class LocalVehicleStore:
         # Handle ORDER BY clause
         order_clause = ""
         if order_by is not None:
-            order_column = {
-                "price": "price",
-                "mileage": "mileage",
-                "year": "year",
-            }.get(order_by.lower(), "price")
-            direction = "DESC" if order_dir.upper() == "DESC" else "ASC"
-            order_clause = f" ORDER BY {order_column} {direction}, vin ASC"
+            order_by_lower = order_by.lower() if isinstance(order_by, str) else "price"
+            if order_by_lower in ("random", "random()"):
+                order_clause = " ORDER BY RANDOM()"
+            elif "," in order_by_lower:
+                # Compound ordering like "year DESC, price ASC"
+                # Validate and build compound order clause
+                allowed_columns = {"price", "mileage", "year"}
+                order_parts = []
+                for part in order_by_lower.split(","):
+                    part = part.strip()
+                    tokens = part.split()
+                    col = tokens[0] if tokens else "price"
+                    dir_token = tokens[1].upper() if len(tokens) > 1 else "ASC"
+                    if col in allowed_columns and dir_token in ("ASC", "DESC"):
+                        order_parts.append(f"{col} {dir_token}")
+                if order_parts:
+                    order_clause = f" ORDER BY {', '.join(order_parts)}, vin ASC"
+                else:
+                    order_clause = " ORDER BY price ASC, vin ASC"
+            else:
+                order_column = {
+                    "price": "price",
+                    "mileage": "mileage",
+                    "year": "year",
+                }.get(order_by_lower, "price")
+                direction = "DESC" if order_dir.upper() == "DESC" else "ASC"
+                order_clause = f" ORDER BY {order_column} {direction}, vin ASC"
 
         # Handle LIMIT clause
         limit_clause = ""
@@ -414,12 +434,24 @@ class LocalVehicleStore:
         # Build final SQL with optional window function for diversity
         if max_per_make_model is not None:
             # Use window function to limit vehicles per make/model combination
-            order_column = {
-                "price": "price",
-                "mileage": "mileage",
-                "year": "year",
-            }.get(order_by.lower() if order_by else "price", "price")
-            direction = "DESC" if order_dir.upper() == "DESC" else "ASC"
+            # Build window ORDER BY clause (similar logic to main order_clause)
+            order_by_lower = order_by.lower() if order_by else "price"
+            allowed_columns = {"price", "mileage", "year"}
+            if "," in order_by_lower:
+                # Compound ordering
+                window_order_parts = []
+                for part in order_by_lower.split(","):
+                    part = part.strip()
+                    tokens = part.split()
+                    col = tokens[0] if tokens else "price"
+                    dir_token = tokens[1].upper() if len(tokens) > 1 else "ASC"
+                    if col in allowed_columns and dir_token in ("ASC", "DESC"):
+                        window_order_parts.append(f"{col} {dir_token}")
+                window_order_expr = ", ".join(window_order_parts) if window_order_parts else "price ASC"
+            else:
+                order_column = allowed_columns & {order_by_lower} and order_by_lower or "price"
+                direction = "DESC" if order_dir.upper() == "DESC" else "ASC"
+                window_order_expr = f"{order_column} {direction}"
 
             sql = f"""
             WITH ranked_vehicles AS (
@@ -431,7 +463,7 @@ class LocalVehicleStore:
                     norm_body_type, norm_fuel_type, norm_is_used,
                     ROW_NUMBER() OVER (
                         PARTITION BY make, model
-                        ORDER BY {order_column} {direction}, vin ASC
+                        ORDER BY {window_order_expr}, vin ASC
                     ) as row_num
                 FROM unified_vehicle_listings{where_clause}
             )

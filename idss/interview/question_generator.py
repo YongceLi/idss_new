@@ -135,6 +135,186 @@ def generate_question(
         )
 
 
+DIMENSION_QUESTION_PROMPT = """You are a helpful car shopping assistant. Your task is to ask a clarifying
+question about a SPECIFIC aspect of what the user is looking for.
+
+## The Dimension to Ask About
+You MUST ask about: **{dimension_topic}**
+
+## Context About This Dimension
+{dimension_context}
+
+## Guidelines
+1. Ask naturally, like a helpful salesperson would
+2. Keep it to 1-2 sentences
+3. Provide 2-4 clickable quick reply options (2-5 words each)
+4. Make the question specific to {dimension_topic}
+5. Use the dimension context to make relevant suggestions
+
+## Important
+- Focus ONLY on {dimension_topic}
+- Use the provided context about the current vehicle options
+- Make quick_replies cover the range of options available"""
+
+
+def generate_question_for_dimension(
+    dimension: str,
+    dimension_context: Dict[str, Any],
+    conversation_history: List[Dict[str, str]],
+    explicit_filters: Dict[str, Any],
+    implicit_preferences: Dict[str, Any],
+) -> QuestionResponse:
+    """
+    Generate a question specifically about a given dimension.
+
+    This is the hybrid approach: entropy selects the dimension,
+    LLM phrases the question naturally.
+
+    Args:
+        dimension: The dimension to ask about (e.g., 'price', 'body_style')
+        dimension_context: Context about the dimension (from entropy selector)
+        conversation_history: Previous messages
+        explicit_filters: Current known filters
+        implicit_preferences: Current known preferences
+
+    Returns:
+        QuestionResponse focused on the specified dimension
+    """
+    config = get_config()
+    client = OpenAI()
+
+    topic = dimension_context.get("topic", dimension)
+
+    # Format dimension context for prompt
+    context_parts = [f"Dimension: {dimension}", f"Topic: {topic}"]
+
+    if dimension_context.get("is_numerical"):
+        context_parts.append(f"Range in current options: {dimension_context.get('range_display', 'varies')}")
+    elif dimension_context.get("is_categorical"):
+        top_vals = dimension_context.get("top_values", [])
+        if top_vals:
+            context_parts.append(f"Common values in current options: {', '.join(str(v) for v in top_vals[:5])}")
+
+    context_parts.append(f"Options available: {dimension_context.get('values_present', 'many')}")
+
+    dim_context_str = "\n".join(context_parts)
+
+    # Build existing context
+    existing_context = []
+    if explicit_filters:
+        filters_clean = {k: v for k, v in explicit_filters.items() if v is not None}
+        if filters_clean:
+            existing_context.append(f"Known filters: {json.dumps(filters_clean)}")
+    if implicit_preferences:
+        prefs_clean = {k: v for k, v in implicit_preferences.items() if v}
+        if prefs_clean:
+            existing_context.append(f"Known preferences: {json.dumps(prefs_clean)}")
+
+    system_prompt = DIMENSION_QUESTION_PROMPT.format(
+        dimension_topic=topic,
+        dimension_context=dim_context_str
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+    ]
+
+    if existing_context:
+        messages.append({
+            "role": "system",
+            "content": f"## What We Already Know\n" + "\n".join(existing_context)
+        })
+
+    # Add conversation history
+    for msg in conversation_history[-4:]:
+        messages.append(msg)
+
+    messages.append({
+        "role": "user",
+        "content": f"Generate a clarifying question about {topic}."
+    })
+
+    try:
+        response = client.beta.chat.completions.parse(
+            model=config.question_generator_model,
+            messages=messages,
+            response_format=QuestionResponse,
+            temperature=0.7
+        )
+
+        result = response.choices[0].message.parsed
+
+        # Override topic to match the dimension
+        result.topic = topic
+
+        logger.info(f"Generated dimension question ({dimension}): {result.question}")
+        logger.info(f"Quick replies: {result.quick_replies}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to generate dimension question: {e}")
+        # Return a default question for this dimension
+        return _get_default_dimension_question(dimension, topic)
+
+
+def _get_default_dimension_question(dimension: str, topic: str) -> QuestionResponse:
+    """Get a default question for a dimension if LLM fails."""
+    defaults = {
+        "price": QuestionResponse(
+            question="What's your budget range for this vehicle?",
+            quick_replies=["Under $20K", "$20K-$35K", "$35K-$50K", "Over $50K"],
+            topic="budget"
+        ),
+        "body_style": QuestionResponse(
+            question="What type of vehicle are you looking for?",
+            quick_replies=["SUV", "Sedan", "Pickup", "Other"],
+            topic="body type"
+        ),
+        "fuel_type": QuestionResponse(
+            question="Do you have a preference for fuel type?",
+            quick_replies=["Gasoline", "Electric", "Hybrid", "No preference"],
+            topic="fuel type"
+        ),
+        "make": QuestionResponse(
+            question="Are there any brands you prefer or want to avoid?",
+            quick_replies=["Toyota/Honda", "Ford/Chevy", "Luxury brands", "Open to any"],
+            topic="brand preference"
+        ),
+        "year": QuestionResponse(
+            question="How new would you like the vehicle to be?",
+            quick_replies=["Brand new (2024+)", "Recent (2020-2023)", "Older is fine", "No preference"],
+            topic="vehicle age"
+        ),
+        "is_used": QuestionResponse(
+            question="Are you looking for a new or used vehicle?",
+            quick_replies=["New only", "Used only", "Either is fine"],
+            topic="new vs used"
+        ),
+        "drivetrain": QuestionResponse(
+            question="Do you need a specific drivetrain?",
+            quick_replies=["AWD/4WD", "Front-wheel drive", "Rear-wheel drive", "No preference"],
+            topic="drivetrain"
+        ),
+        "transmission": QuestionResponse(
+            question="Do you have a transmission preference?",
+            quick_replies=["Automatic", "Manual", "No preference"],
+            topic="transmission"
+        ),
+        "mileage": QuestionResponse(
+            question="What mileage range would you consider?",
+            quick_replies=["Under 30K miles", "30K-60K miles", "60K-100K miles", "Any mileage"],
+            topic="mileage preference"
+        ),
+    }
+
+    return defaults.get(dimension, QuestionResponse(
+        question=f"What are your preferences for {topic}?",
+        quick_replies=["Important to me", "Somewhat important", "Not important", "No preference"],
+        topic=topic
+    ))
+
+
 def generate_recommendation_intro(
     explicit_filters: Dict[str, Any],
     implicit_preferences: Dict[str, Any],

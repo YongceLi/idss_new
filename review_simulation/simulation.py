@@ -1046,11 +1046,20 @@ def evaluate_persona(
     n_per_row: int = 3,
     confidence_threshold: float = 0.5,
     max_assessment_attempts: int = 3,
+    # Ablation flags
+    use_mmr_diversification: bool = True,
+    use_entropy_bucketing: bool = True,
+    use_progressive_relaxation: bool = True,
+    use_entropy_questions: bool = True,
 ) -> SimulationResult:
     controller = create_controller(
         k=k,
         n_vehicles_per_row=n_per_row,
         recommendation_method=recommendation_method,
+        use_mmr_diversification=use_mmr_diversification,
+        use_entropy_bucketing=use_entropy_bucketing,
+        use_progressive_relaxation=use_progressive_relaxation,
+        use_entropy_questions=use_entropy_questions,
     )
     response = controller.process_input(persona_turn.message)
     conversation_history: List[Dict[str, str]] = [

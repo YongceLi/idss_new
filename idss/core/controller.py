@@ -17,8 +17,14 @@ from idss.parsing.semantic_parser import (
 )
 from idss.interview.question_generator import (
     generate_question,
+    generate_question_for_dimension,
     generate_recommendation_intro,
     QuestionResponse
+)
+from idss.interview.entropy_question_selector import (
+    select_question_dimension,
+    get_dimension_topic,
+    get_dimension_context,
 )
 from idss.diversification.entropy import (
     select_diversification_dimension,
@@ -27,6 +33,7 @@ from idss.diversification.entropy import (
 from idss.diversification.bucketing import diversify_with_entropy_bucketing
 from idss.recommendation.embedding_similarity import rank_with_embedding_similarity
 from idss.recommendation.coverage_risk import rank_with_coverage_risk
+from idss.recommendation.progressive_relaxation import progressive_filter_relaxation
 
 logger = get_logger("core.controller")
 
@@ -38,6 +45,7 @@ class SessionState:
     implicit_preferences: Dict[str, Any] = field(default_factory=dict)
     conversation_history: List[Dict[str, str]] = field(default_factory=list)
     questions_asked: List[str] = field(default_factory=list)
+    asked_dimensions: set = field(default_factory=set)  # Dimensions already asked about
     question_count: int = 0
 
 
@@ -174,13 +182,22 @@ class IDSSController:
         return False
 
     def _generate_question(self) -> IDSSResponse:
-        """Generate a clarifying question."""
-        question_response = generate_question(
-            conversation_history=self.state.conversation_history,
-            explicit_filters=self.state.explicit_filters,
-            implicit_preferences=self.state.implicit_preferences,
-            questions_asked=self.state.questions_asked
-        )
+        """Generate a clarifying question using entropy-based or LLM-based selection."""
+
+        question_response = None
+
+        # Try entropy-based question selection if enabled
+        if self.config.use_entropy_questions:
+            question_response = self._generate_entropy_based_question()
+
+        # Fallback to pure LLM-based question generation
+        if question_response is None:
+            question_response = generate_question(
+                conversation_history=self.state.conversation_history,
+                explicit_filters=self.state.explicit_filters,
+                implicit_preferences=self.state.implicit_preferences,
+                questions_asked=self.state.questions_asked
+            )
 
         # Update state
         self.state.question_count += 1
@@ -199,6 +216,82 @@ class IDSSController:
             filters_extracted=self.state.explicit_filters,
             preferences_extracted=self.state.implicit_preferences
         )
+
+    def _generate_entropy_based_question(self) -> Optional[QuestionResponse]:
+        """
+        Generate a question based on entropy analysis of candidate set.
+
+        Returns:
+            QuestionResponse if a high-entropy dimension found, None otherwise
+        """
+        # Get preliminary candidates for entropy calculation
+        candidates = self._get_preliminary_candidates(limit=200)
+
+        if not candidates or len(candidates) < 10:
+            logger.info("Not enough candidates for entropy-based question selection")
+            return None
+
+        # Select dimension with highest entropy
+        selected_dim = select_question_dimension(
+            candidates=candidates,
+            explicit_filters=self.state.explicit_filters,
+            asked_dimensions=self.state.asked_dimensions,
+            min_entropy_threshold=0.3,
+        )
+
+        if selected_dim is None:
+            logger.info("No suitable dimension for entropy-based question")
+            return None
+
+        # Get context about the dimension for LLM
+        dim_context = get_dimension_context(selected_dim, candidates)
+
+        # Generate question using LLM with dimension focus
+        question_response = generate_question_for_dimension(
+            dimension=selected_dim,
+            dimension_context=dim_context,
+            conversation_history=self.state.conversation_history,
+            explicit_filters=self.state.explicit_filters,
+            implicit_preferences=self.state.implicit_preferences,
+        )
+
+        # Track that we asked about this dimension
+        self.state.asked_dimensions.add(selected_dim)
+
+        logger.info(f"Entropy-based question for dimension '{selected_dim}': {question_response.question}")
+
+        return question_response
+
+    def _get_preliminary_candidates(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """
+        Get preliminary candidates based on current filters for entropy calculation.
+
+        Args:
+            limit: Maximum number of candidates to retrieve
+
+        Returns:
+            List of vehicle dictionaries
+        """
+        # Clean filters for database query
+        db_filters = {}
+        for key, value in self.state.explicit_filters.items():
+            if value is not None:
+                db_filters[key] = value
+
+        # Add default year range if no filters
+        if not db_filters:
+            db_filters['year'] = '2018-2025'
+
+        try:
+            candidates = self.store.search_listings(
+                filters=db_filters,
+                limit=limit,
+                order_by="year DESC, price ASC",
+            )
+            return candidates
+        except Exception as e:
+            logger.error(f"Failed to get preliminary candidates: {e}")
+            return []
 
     def _generate_recommendations(self) -> IDSSResponse:
         """Generate recommendations with ranking method + entropy-based diversification."""
@@ -235,13 +328,30 @@ class IDSSController:
             explicit_filters=self.state.explicit_filters
         )
 
-        # Step 5: Bucket vehicles using entropy-based diversification
-        buckets, bucket_labels, _ = diversify_with_entropy_bucketing(
-            vehicles=ranked_candidates,
-            dimension=div_dimension,
-            n_rows=self.config.num_rows,
-            n_per_row=self.config.n_vehicles_per_row
-        )
+        # Step 5: Bucket vehicles using entropy-based diversification (or skip if ablation)
+        if self.config.use_entropy_bucketing:
+            buckets, bucket_labels, _ = diversify_with_entropy_bucketing(
+                vehicles=ranked_candidates,
+                dimension=div_dimension,
+                n_rows=self.config.num_rows,
+                n_per_row=self.config.n_vehicles_per_row
+            )
+        else:
+            # Ablation: just take top N vehicles without diversification
+            logger.info("Entropy bucketing disabled (ablation mode)")
+            total_vehicles = self.config.num_rows * self.config.n_vehicles_per_row
+            flat_vehicles = ranked_candidates[:total_vehicles]
+            # Split into rows without diversification
+            buckets = []
+            bucket_labels = []
+            for i in range(self.config.num_rows):
+                start = i * self.config.n_vehicles_per_row
+                end = start + self.config.n_vehicles_per_row
+                row = flat_vehicles[start:end]
+                if row:
+                    buckets.append(row)
+                    bucket_labels.append(f"Row {i+1}")
+            div_dimension = None
 
         # Step 5: Generate introduction message
         intro_message = generate_recommendation_intro(
@@ -271,6 +381,9 @@ class IDSSController:
         """
         Get candidate vehicles from the database.
 
+        If progressive relaxation is enabled (default), progressively relaxes filters
+        from least to most important until results are found.
+
         Args:
             limit: Maximum number of candidates to retrieve
 
@@ -283,19 +396,35 @@ class IDSSController:
             if value is not None:
                 db_filters[key] = value
 
-        # If no filters, add a default year range to avoid returning everything
-        if not db_filters:
-            db_filters['year'] = '2018-2025'
-            logger.info("No filters specified, using default year range: 2018-2025")
-
         try:
-            candidates = self.store.search_listings(
-                filters=db_filters,
-                limit=limit,
-                order_by="price",
-                order_dir="ASC"
-            )
-            return candidates
+            if self.config.use_progressive_relaxation:
+                # Use progressive filter relaxation to find candidates
+                candidates, relaxation_state = progressive_filter_relaxation(
+                    store=self.store,
+                    explicit_filters=db_filters,
+                    limit=limit
+                )
+
+                # Store relaxation state for potential use in response generation
+                self._last_relaxation_state = relaxation_state
+
+                if relaxation_state.get("relaxed_filters"):
+                    logger.info(f"Filters relaxed to find results: {relaxation_state['relaxed_filters']}")
+
+                return candidates
+            else:
+                # Simple query without relaxation (ablation mode)
+                logger.info("Progressive relaxation disabled (ablation mode)")
+                if not db_filters:
+                    db_filters['year'] = '2018-2025'
+                candidates = self.store.search_listings(
+                    filters=db_filters,
+                    limit=limit,
+                    order_by="price",
+                    order_dir="ASC"
+                )
+                self._last_relaxation_state = {"all_criteria_met": True, "relaxed_filters": []}
+                return candidates
         except Exception as e:
             logger.error(f"Failed to get candidates: {e}")
             return []
@@ -320,14 +449,15 @@ class IDSSController:
 
         if method == "embedding_similarity":
             # Embedding Similarity: Dense Vector + MMR
-            logger.info(f"Ranking with Embedding Similarity (Dense + MMR)...")
+            use_mmr = self.config.use_mmr_diversification
+            logger.info(f"Ranking with Embedding Similarity (Dense + MMR={use_mmr})...")
             ranked = rank_with_embedding_similarity(
                 vehicles=candidates,
                 explicit_filters=self.state.explicit_filters,
                 implicit_preferences=self.state.implicit_preferences,
                 top_k=top_k,
                 lambda_param=self.config.embedding_similarity_lambda_param,
-                use_mmr=True
+                use_mmr=use_mmr
             )
         elif method == "coverage_risk":
             # Coverage-Risk Optimization

@@ -26,7 +26,7 @@ class ExplicitFilters(BaseModel):
     year: Optional[str] = Field(None, description="Year or year range (e.g., '2020', '2018-2022')")
     price: Optional[str] = Field(None, description="Price range (e.g., '20000-30000')")
     mileage: Optional[str] = Field(None, description="Mileage range (e.g., '0-50000')")
-    body_style: Optional[str] = Field(None, description="Body style (e.g., 'SUV', 'Sedan,Truck')")
+    body_style: Optional[str] = Field(None, description="Body style (e.g., 'SUV', 'Sedan', 'Pickup')")
     fuel_type: Optional[str] = Field(None, description="Fuel type (e.g., 'Electric', 'Hybrid,Gasoline')")
     drivetrain: Optional[str] = Field(None, description="Drivetrain (e.g., 'AWD', '4WD,FWD')")
     transmission: Optional[str] = Field(None, description="Transmission type (e.g., 'Automatic')")
@@ -80,7 +80,14 @@ Your job is to analyze user messages and extract:
 - Only extract filters that are CLEARLY stated
 - Use ranges for price/mileage/year (e.g., "under 30k" → "0-30000")
 - Multiple values should be comma-separated (e.g., "Honda or Toyota" → "Honda,Toyota")
-- Body styles: SUV, Sedan, Truck, Coupe, Hatchback, Convertible, Van, Wagon
+- Do NOT include trim level in model name (e.g., "Bronco Badlands" should be model="Bronco", NOT model="Bronco Badlands")
+
+### Available Values for Categorical Filters (use EXACTLY these values)
+- Body styles: SUV, Sedan, Pickup, Coupe, Hatchback, Convertible, Wagon, Minivan, Van, Cargo Van, Passenger Van, Targa, Combi, Chassis Cab, Cutaway, Car Van, Mini Mpv, Micro Car
+  - IMPORTANT: Use "Pickup" for trucks (NOT "Truck")
+- Fuel types: Gasoline, Electric, Diesel, Hybrid (Electric + Gasoline), Hydrogen, Hybrid (Electric + Hydrogen)
+- Drivetrains: AWD, 4WD, FWD, RWD
+- Transmissions: Automatic, Manual, CVT, Automated Manual, Direct Drive
 
 ### Detecting Impatience
 Set is_impatient=true if the user:
