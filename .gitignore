@@ -89,8 +89,8 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# Data files (symlinked from original repo)
-data/
+# Data files (symlinked from original repo) - only top-level data folder
+/data/
 
 # Large model files
 *.pt
@@ -101,6 +101,10 @@ data/
 # Logs
 logs/
 *.log
+
+# Evaluation results
+results_*.txt
+run_k_sweep.sh
 
 # Temporary files
 tmp/
